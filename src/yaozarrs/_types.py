@@ -1,4 +1,4 @@
-import json
+from collections.abc import Hashable, Mapping, Sequence
 from typing import Annotated, Any, TypeVar
 
 from pydantic import AfterValidator, BaseModel, Field
@@ -6,24 +6,40 @@ from pydantic_core import PydanticCustomError
 
 T = TypeVar("T")
 
+BASIC_TYPES = (str, int, float, bool, type(None))
 
-def _canonical_key(x: Any) -> str:
-    """Return a string that is equal iff two items are JSON-equivalent.
 
-    Pydantic models are unhashable by default, so uniqueness can't be checked with
-    a plain `set`. Serializing to canonical JSON gives a hashable stand-in. The
-    type name is included for models so that two different model classes that
-    happen to serialize identically remain distinct (matching `BaseModel.__eq__`,
-    which compares classes).
+def _canonical_key(x: Any) -> Hashable:
+    """Return a hashable key that compares equal iff two items are JSON-equivalent.
+
+    This lets uniqueness be checked with a dict (O(N)) rather than by comparing
+    every pair (O(N²)); pydantic models are unhashable by default, so they can't
+    be put in a set directly.
+
+    Composite keys are tagged by kind so that, e.g., a model can never collide
+    with a sequence that happens to canonicalize to the same tuple.
     """
     if isinstance(x, BaseModel):
-        return f"{type(x).__name__}:{x.model_dump_json()}"
-    return json.dumps(x, sort_keys=True, default=str)
+        # class identity is part of the key because BaseModel.__eq__ compares
+        # classes; the fully qualified name keeps same-named models in different
+        # modules distinct (e.g. v04.Column vs v05.Column).
+        cls = type(x)
+        return ("model", f"{cls.__module__}.{cls.__qualname__}", x.model_dump_json())
+    if isinstance(x, BASIC_TYPES):
+        # returned bare: dict lookup uses hash/__eq__, so numeric equivalences
+        # (1 == 1.0 == True) collapse just as `a == b` did.
+        return x
+    if isinstance(x, Mapping):
+        # frozenset rather than sorted() because keys need not be orderable
+        return ("map", frozenset((k, _canonical_key(v)) for k, v in x.items()))
+    if isinstance(x, Sequence):
+        return ("seq", tuple(_canonical_key(i) for i in x))
+    raise TypeError(f"Unsupported type for JSON equivalence: {type(x)}")
 
 
 def _validate_unique_list(v: list[T]) -> list[T]:
     """Validate that all items in the list are unique, using JSON equivalence."""
-    seen: dict[str, int] = {}
+    seen: dict[Hashable, int] = {}
     for i, item in enumerate(v):
         key = _canonical_key(item)
         if (j := seen.get(key)) is not None:
