@@ -1,4 +1,4 @@
-from collections.abc import Mapping, Sequence
+import json
 from typing import Annotated, Any, TypeVar
 
 from pydantic import AfterValidator, BaseModel, Field
@@ -6,33 +6,33 @@ from pydantic_core import PydanticCustomError
 
 T = TypeVar("T")
 
-BASIC_TYPES = (str, int, float, bool, type(None), BaseModel)
 
+def _canonical_key(x: Any) -> str:
+    """Return a string that is equal iff two items are JSON-equivalent.
 
-def _is_json_equivalent(a: Any, b: Any) -> bool:
-    if isinstance(a, BASIC_TYPES) and isinstance(b, BASIC_TYPES):
-        return bool(a == b)
-    if isinstance(a, Mapping) and isinstance(b, Mapping):  # pragma: no cover
-        if a.keys() != b.keys():
-            return False
-        return all(_is_json_equivalent(a[k], b[k]) for k in a)
-    if isinstance(a, Sequence) and isinstance(b, Sequence):  # pragma: no cover
-        return all(_is_json_equivalent(x, y) for x, y in zip(a, b, strict=True))
-    raise TypeError(  # pragma: no cover
-        f"Unsupported type for JSON equivalence: {type(a)}"
-    )
+    Pydantic models are unhashable by default, so uniqueness can't be checked with
+    a plain `set`. Serializing to canonical JSON gives a hashable stand-in. The
+    type name is included for models so that two different model classes that
+    happen to serialize identically remain distinct (matching `BaseModel.__eq__`,
+    which compares classes).
+    """
+    if isinstance(x, BaseModel):
+        return f"{type(x).__name__}:{x.model_dump_json()}"
+    return json.dumps(x, sort_keys=True, default=str)
 
 
 def _validate_unique_list(v: list[T]) -> list[T]:
     """Validate that all items in the list are unique, using JSON equivalence."""
-    for i, a in enumerate(v):
-        for j in range(i + 1, len(v)):
-            if _is_json_equivalent(a, v[j]):
-                raise PydanticCustomError(
-                    "listItemsNotUnique",
-                    "List items are not unique. Equal items found at indices: {idx}",
-                    {"idx": (i, j)},
-                )
+    seen: dict[str, int] = {}
+    for i, item in enumerate(v):
+        key = _canonical_key(item)
+        if (j := seen.get(key)) is not None:
+            raise PydanticCustomError(
+                "listItemsNotUnique",
+                "List items are not unique. Equal items found at indices: {idx}",
+                {"idx": (j, i)},
+            )
+        seen[key] = i
     return v
 
 
